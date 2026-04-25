@@ -26,6 +26,7 @@ The format used here is established by [ADR-0001](0001-use-architecture-decision
 | ------------------------------------------------------ | -------------------------------------------------------------- | -------- | ---------- | ---------------------------------------------------------------------------------------------- |
 | [0001](0001-use-architecture-decision-records.md)      | Use Architecture Decision Records to Document Design Rationale | Accepted | 2026-04-22 | Adopt ADRs as the documentation format for architecturally significant decisions.              |
 | [0002](0002-adopt-diataxis-documentation-framework.md) | Adopt Diátaxis as the Documentation Framework                  | Accepted | 2026-04-24 | Adopt the Diátaxis four-quadrant framework for non-ADR documentation in adopting repositories. |
+| [0003](0003-use-deny-all-gitignore-strategy.md)        | Use a Deny-All `.gitignore` Strategy                           | Accepted | 2026-04-25 | Adopt deny-all `.gitignore` with explicit allowlist as the default tracking strategy for adopting repositories. |
 
 ## Status Lifecycle
 
