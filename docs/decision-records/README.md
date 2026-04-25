@@ -4,7 +4,7 @@ This directory defines the portfolio's Architecture Decision Record (ADR) baseli
 
 The directory is named `decision-records` because the full name is more readable to contributors, reviewers, and auditors who may not already know the acronym.
 
-At the portfolio root, this directory serves as the canonical baseline. The structure defined in [ADR-0001](0001-use-architecture-decision-records.md) is the shape that participating repositories should copy into their own `.github/docs/decision-records/` directory when they adopt this convention. Those repositories should reuse the structure, not this directory's prose verbatim.
+This `nwarila-platform/.github` directory holds the **master copies** of every org-baseline ADR. Each adopting child repository mirrors the master ADRs into its own `docs/decision-records/org/` directory (byte-identical content) and may add its own `docs/decision-records/repo/` ADRs for repository-scoped decisions, per [ADR-0001](0001-use-architecture-decision-records.md). The same MADR 4.0-aligned format applies to both scopes.
 
 ADRs may begin as `Proposed` while a decision is being discussed. Once accepted, an ADR becomes part of the repository's permanent historical record. Accepted ADRs are not substantively rewritten; later decisions supersede earlier ones through new ADRs. Post-acceptance edits are limited to status updates, supersession links, implementing-PR links, and editorial fixes that do not change the decision itself.
 
@@ -43,16 +43,18 @@ An Accepted ADR may still receive non-substantive maintenance updates, but any c
 ## How to Contribute a New ADR
 
 1. Decide whether the change is architecturally significant. The four tests are in [ADR-0001](0001-use-architecture-decision-records.md) under `Decision Outcome`. When in doubt, err toward writing the ADR; a short record is cheaper than reconstructing the reasoning later.
-2. Copy [ADR-0001](0001-use-architecture-decision-records.md) to a new file at `.github/docs/decision-records/NNNN-short-kebab-title.md`, where `NNNN` is the next unused four-digit number in this directory. Numbers are allocated monotonically and never reused.
-3. Strip the template-instruction HTML comment block at the top of the copied file. Exception: if you are seeding a repository's own `ADR-0001` per step 5, keep the block so it continues to serve as that repository's template.
-4. Replace the metadata values and every section body with content specific to the new decision. Keep the section headings in the order shown. For sections that genuinely do not apply, write "None." or "N/A (reason)." rather than deleting the heading. A missing heading reads as "I forgot"; an explicit "None." reads as "I considered this and there is nothing to record."
-5. If you are seeding a different repository with its initial `ADR-0001`, reuse the structure but rewrite repository-specific context, consequences, and compliance notes so the record is true for that repository.
-6. Update this index file. Add a row for the new ADR with its Status (usually `Proposed` or `Accepted`), Date, and a one-sentence Summary.
-7. Open a pull request in the repository where the ADR lives. The new ADR and the index update belong in the same PR.
+2. Decide the **scope**:
+   - **Org-baseline** — the decision applies across the `nwarila-platform` organization. Author the ADR in this `nwarila-platform/.github` repository at `docs/decision-records/NNNN-short-kebab-title.md`. After it is accepted, mirror it into every adopting child repository's `docs/decision-records/org/` directory in a follow-up sync PR per repo.
+   - **Repository-specific** — the decision affects only one repository. Author the ADR in that repository at `docs/decision-records/repo/NNNN-short-kebab-title.md`. Do not mirror it elsewhere.
+3. Copy [ADR-0001](0001-use-architecture-decision-records.md) to the new file. `NNNN` is the next unused four-digit number in the chosen scope's directory. Numbers are allocated monotonically and never reused. The org and repo namespaces are independent (ADR `org/0001` and `repo/0001` can coexist in different directories).
+4. Strip the template-instruction HTML comment block at the top of the copied file.
+5. Replace the metadata values and every section body with content specific to the new decision. Keep the section headings in the order shown. For sections that genuinely do not apply, write "None." or "N/A (reason)." rather than deleting the heading. A missing heading reads as "I forgot"; an explicit "None." reads as "I considered this and there is nothing to record."
+6. Update the appropriate index. For org-baseline ADRs, update the Index in this README. For repository-specific ADRs, update the corresponding section of the owning repository's `docs/decision-records/README.md`.
+7. Open a pull request in the repository where the new ADR lives. The new ADR and the index update belong in the same PR.
 
 ## Conventions
 
-- **Directory.** In any repository using this convention, ADRs live in `.github/docs/decision-records/` relative to the repository root, alongside other governance files under `.github/`.
+- **Directory layout.** Org-baseline ADRs live in `nwarila-platform/.github/docs/decision-records/` (master copies in this repo) and `docs/decision-records/org/` (mirrored copies in every adopting child repo). Repository-specific ADRs live in `docs/decision-records/repo/` in their owning repository only.
 - **Directory naming.** Use `decision-records` as the directory name so the purpose is obvious even to readers who do not know the acronym.
 - **Filenames.** `NNNN-short-kebab-title.md`, where `NNNN` is a four-digit zero-padded number and the title is a present-tense verb phrase in kebab case. Example: `0004-pin-github-actions-by-commit-sha.md`.
 - **Numbering.** Monotonic. Gaps are allowed. Numbers are never reused, even if a proposed ADR is later abandoned.
