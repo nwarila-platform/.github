@@ -1,0 +1,17 @@
+{
+  "version": "1",
+  "files": [
+    {
+      "source": "docs/decision-records/0001-use-architecture-decision-records.md",
+      "target": "docs/decision-records/org/0001-use-architecture-decision-records.md"
+    },
+    {
+      "source": "docs/decision-records/0002-adopt-diataxis-documentation-framework.md",
+      "target": "docs/decision-records/org/0002-adopt-diataxis-documentation-framework.md"
+    },
+    {
+      "source": "docs/decision-records/0003-use-deny-all-gitignore-strategy.md",
+      "target": "docs/decision-records/org/0003-use-deny-all-gitignore-strategy.md"
+    }
+  ]
+}
