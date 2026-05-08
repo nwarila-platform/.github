@@ -1,0 +1,18 @@
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Tooling
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
