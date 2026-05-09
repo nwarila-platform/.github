@@ -12,6 +12,34 @@
     {
       "source": "docs/decision-records/0003-use-deny-all-gitignore-strategy.md",
       "target": "docs/decision-records/org/0003-use-deny-all-gitignore-strategy.md"
+    },
+    {
+      "source": "docs/decision-records/org/.gitkeep",
+      "target": "docs/decision-records/org/.gitkeep"
+    },
+    {
+      "source": "docs/decision-records/template/.gitkeep",
+      "target": "docs/decision-records/template/.gitkeep"
+    },
+    {
+      "source": "docs/decision-records/repo/.gitkeep",
+      "target": "docs/decision-records/repo/.gitkeep"
+    },
+    {
+      "source": "docs/tutorials/.gitkeep",
+      "target": "docs/tutorials/.gitkeep"
+    },
+    {
+      "source": "docs/how-to/.gitkeep",
+      "target": "docs/how-to/.gitkeep"
+    },
+    {
+      "source": "docs/reference/.gitkeep",
+      "target": "docs/reference/.gitkeep"
+    },
+    {
+      "source": "docs/explanation/.gitkeep",
+      "target": "docs/explanation/.gitkeep"
     }
   ]
 }
