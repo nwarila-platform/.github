@@ -14,6 +14,10 @@
       "target": "docs/decision-records/org/0003-use-deny-all-gitignore-strategy.md"
     },
     {
+      "source": "docs/decision-records/0004-use-renovate-for-dependency-updates.md",
+      "target": "docs/decision-records/org/0004-use-renovate-for-dependency-updates.md"
+    },
+    {
       "source": "docs/decision-records/org/.gitkeep",
       "target": "docs/decision-records/org/.gitkeep"
     },
