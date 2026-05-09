@@ -42,7 +42,7 @@ jobs:
         # renovate: datasource=github-tags depName=NWarila/drift-gate
         run: >-
           python -m pip install --no-cache-dir
-          'git+https://github.com/NWarila/drift-gate@973c3a9e4cee3000118e39a0cc9014eb6f4972a1'
+          'git+https://github.com/NWarila/drift-gate@d835ae411f1e55e25b2b6c079d5891e7345a043c'
 
       - name: Validate baseline-manifest.json
         run: |
