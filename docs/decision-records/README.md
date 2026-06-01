@@ -34,6 +34,7 @@ The format used here is established by [ADR-0001](0001-use-architecture-decision
 | [0002](0002-adopt-diataxis-documentation-framework.md) | Adopt Diátaxis as the Documentation Framework                  | Accepted | 2026-04-24 | Adopt the Diátaxis four-quadrant framework for non-ADR documentation in adopting repositories. |
 | [0003](0003-use-deny-all-gitignore-strategy.md)        | Use a Deny-All `.gitignore` Strategy                           | Accepted | 2026-04-25 | Adopt deny-all `.gitignore` with explicit allowlist as the default tracking strategy for adopting repositories. |
 | [0004](0004-use-renovate-for-dependency-updates.md)    | Use Renovate for Dependency Updates with Per-Template Baselines | Accepted | 2026-05-05 | Adopt Renovate org-wide; each type-template owns a self-contained `renovate.json5`; consumers extend their type-template only. No org-level Renovate config. Replaces Dependabot. |
+| [0005](0005-keep-github-control-planes-namespace-local.md) | Keep GitHub Control Planes Namespace-Local              | Accepted | 2026-06-01 | Repositories use their owning namespace's `.github` control plane for org ADRs, community files, repo hygiene, and reusable workflow callers. |
 
 ## Status Lifecycle
 
