@@ -62,3 +62,56 @@ jobs:
               raise SystemExit(1)
           print("all sources resolve on disk")
           PY
+
+  repo-hygiene-smoke:
+    name: smoke reusable-repo-hygiene
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-repo-hygiene.yaml
+    with:
+      source_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  codeql-smoke:
+    name: smoke reusable-codeql
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/reusable-codeql.yaml
+
+  iac-security-smoke:
+    name: smoke reusable-iac-security
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/reusable-iac-security.yaml
+
+  scorecard-smoke:
+    name: smoke reusable-scorecard
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/reusable-scorecard.yaml
+
+  auto-merge-smoke:
+    name: smoke reusable-auto-merge
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/reusable-auto-merge.yaml
+    with:
+      smoke: true
+
+  release-please-smoke:
+    name: smoke reusable-release-please
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    uses: ./.github/workflows/reusable-release-please.yaml
+    with:
+      smoke: true
