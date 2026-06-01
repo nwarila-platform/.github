@@ -18,6 +18,10 @@
       "target": "docs/decision-records/org/0004-use-renovate-for-dependency-updates.md"
     },
     {
+      "source": "docs/decision-records/0005-keep-github-control-planes-namespace-local.md",
+      "target": "docs/decision-records/org/0005-keep-github-control-planes-namespace-local.md"
+    },
+    {
       "source": "docs/decision-records/org/.gitkeep",
       "target": "docs/decision-records/org/.gitkeep"
     },
