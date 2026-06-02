@@ -50,17 +50,20 @@ jobs:
           from pathlib import Path
           from baseline.manifest import load_manifest
 
-          manifest_path = Path("baseline-manifest.json")
-          m = load_manifest(manifest_path)
-          print(f"manifest: version={m.version}, files={len(m.files)}")
+          for manifest_path in (
+              Path("baseline-manifest.json"),
+              Path("org-adr-manifest.json"),
+          ):
+              m = load_manifest(manifest_path)
+              print(f"{manifest_path}: version={m.version}, files={len(m.files)}")
 
-          missing = [f.source for f in m.files if not Path(f.source).is_file()]
-          if missing:
-              print("ERROR: manifest entries reference sources missing on disk:")
-              for s in missing:
-                  print(f"  - {s}")
-              raise SystemExit(1)
-          print("all sources resolve on disk")
+              missing = [f.source for f in m.files if not Path(f.source).is_file()]
+              if missing:
+                  print("ERROR: manifest entries reference sources missing on disk:")
+                  for s in missing:
+                      print(f"  - {s}")
+                  raise SystemExit(1)
+              print(f"all sources resolve on disk for {manifest_path}")
           PY
 
   adr-schema:
