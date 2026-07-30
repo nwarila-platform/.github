@@ -2,10 +2,11 @@ name: Reusable Release Please
 
 # Standard release-please integration shared across every consumer. Watches
 # main for Conventional Commits, opens a release PR, and on merge of that
-# PR tags + publishes a GitHub release. Every consumer also has a
-# optional `release.yaml` caller can run release evidence; this workflow
-# dispatches that task on every release so the new tag gets a uniform evidence
-# bundle attached.
+# PR tags + publishes a GitHub release. A consumer may also provide an
+# optional `release.yaml` entrypoint exposing a `release-evidence` task; when
+# one is present this workflow dispatches that task on every release, so the new
+# tag gets a uniform evidence bundle attached. Consumers without that
+# entrypoint are supported and simply skip the dispatch.
 #
 # Caller pattern (in each consumer):
 #   name: Release
@@ -105,6 +106,14 @@ jobs:
             fi
           done
 
+      # release.yaml is optional per the contract above, so probe for it before
+      # dispatching. Without the probe a consumer that names its caller anything
+      # else - or omits the evidence entrypoint entirely - fails this step with
+      # "HTTP 404: workflow release.yaml not found on the default branch" on
+      # every commit that cuts a release, after the tag and GitHub release have
+      # already been published. That leaves a permanently red release run that
+      # masks real regressions. Skipping is the correct outcome: no evidence
+      # entrypoint means there is no evidence task to run.
       - name: Dispatch release evidence
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
@@ -113,4 +122,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ steps.release.outputs.tag_name }}
           REPOSITORY: ${{ github.repository }}
-        run: gh workflow run release.yaml --field task=release-evidence --ref "$TAG_NAME" --repo "$REPOSITORY"
+        run: |
+          if gh api "repos/${REPOSITORY}/actions/workflows/release.yaml" --silent 2>/dev/null; then
+            gh workflow run release.yaml --field task=release-evidence --ref "$TAG_NAME" --repo "$REPOSITORY"
+            echo "dispatched release-evidence for ${TAG_NAME}"
+          else
+            echo "note: ${REPOSITORY} has no release.yaml on its default branch; skipping the release-evidence dispatch (the entrypoint is optional)"
+          fi
