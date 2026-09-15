@@ -66,6 +66,21 @@ jobs:
               print(f"all sources resolve on disk for {manifest_path}")
           PY
 
+      - name: Validate template-drift.json with the published checker
+        run: |
+          set -euo pipefail
+          chmod -R a+rX .
+          status=0
+          docker run --quiet --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --volume "${PWD}:/workspace:ro" --volume "${PWD}:/source:ro" \
+            ghcr.io/nwarila-platform/workflow-template-drift:1.0.1@sha256:f969139e479618f59cb57d02053061c82bb5d89815a53d05ac878dffaea7e35d \
+            --workspace /workspace --source /source --config template-drift.json --fail-on error --format json \
+            > "${RUNNER_TEMP}/template-drift.result" 2> "${RUNNER_TEMP}/template-drift.stderr" || status=$?
+          test ! -s "${RUNNER_TEMP}/template-drift.stderr"
+          test "${status}" -ne 2
+          jq -e '.version == 1 and (.status == "PASS" or .status == "WARNING" or .status == "FAIL")' "${RUNNER_TEMP}/template-drift.result" > /dev/null
+          printf 'template-drift.json is a valid version-3 configuration; checker status %s\n' "$(jq -r .status "${RUNNER_TEMP}/template-drift.result")"
+
   adr-schema:
     name: validate ADR schema
     runs-on: ubuntu-latest
@@ -154,3 +169,13 @@ jobs:
       source_repo: nwarila-platform/.github
       source_ref: main
       smoke: true
+
+  template-drift-smoke:
+    name: smoke reusable-template-drift
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-template-drift.yaml
+    with:
+      template_repository: nwarila-platform/.github
+      template_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      config: tools/template-drift-smoke.json

@@ -1,0 +1,1 @@
+{"version": 3, "checks": [{"mode": "bytes_equal", "path": "LICENSE"}, {"mode": "must_exist", "path": "SECURITY.md"}, {"mode": "must_be_absent", "path": ".github/dependabot.yml"}]}
