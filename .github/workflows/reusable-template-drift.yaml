@@ -1,0 +1,270 @@
+name: Reusable Template Drift
+
+# Evaluates the caller against a pinned public template without passing a token
+# to the checker. The caller pins this reusable workflow to a full commit SHA.
+#
+# Caller pattern:
+#   uses: nwarila-platform/.github/.github/workflows/reusable-template-drift.yaml@<sha>
+#   with:
+#     template_ref: <40-character-template-commit-sha>
+
+on:
+  workflow_call:
+    inputs:
+      template_repository:
+        description: Public owner/repository containing the template.
+        required: false
+        type: string
+        default: nwarila-platform/.github
+      template_ref:
+        description: Required 40-character lowercase commit SHA of the template.
+        required: true
+        type: string
+      config:
+        description: Configuration path relative to the template root.
+        required: false
+        type: string
+        default: template-drift.json
+      fail_on:
+        description: Lowest finding severity that fails the check (error or warning).
+        required: false
+        type: string
+        default: error
+
+permissions:
+  contents: read
+
+jobs:
+  template-drift:
+    name: template drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Validate inputs
+        shell: bash
+        env:
+          FAIL_ON: ${{ inputs.fail_on }}
+          TEMPLATE_REF: ${{ inputs.template_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TEMPLATE_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' 'error: template_ref must be a 40-character lowercase commit SHA' >&2
+            exit 2
+          fi
+          if [[ "${FAIL_ON}" != error && "${FAIL_ON}" != warning ]]; then
+            printf '%s\n' 'error: fail_on must be error or warning' >&2
+            exit 2
+          fi
+
+      - name: Check out caller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: workspace
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out pinned template
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ inputs.template_repository }}
+          ref: ${{ inputs.template_ref }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Make checkout mounts readable by UID 65532
+        shell: bash
+        run: chmod -R a+rX workspace source
+
+      - name: Evaluate drift
+        id: evaluate
+        shell: bash
+        env:
+          CONFIG: ${{ inputs.config }}
+          FAIL_ON: ${{ inputs.fail_on }}
+        run: |
+          set -euo pipefail
+          # renovate: datasource=docker depName=ghcr.io/nwarila-platform/workflow-template-drift
+          image='ghcr.io/nwarila-platform/workflow-template-drift:1.0.1@sha256:f969139e479618f59cb57d02053061c82bb5d89815a53d05ac878dffaea7e35d'
+          result="${RUNNER_TEMP}/template-drift.json"
+          stderr_file="${RUNNER_TEMP}/template-drift.stderr"
+          status=0
+          : >"${result}"
+          : >"${stderr_file}"
+
+          if docker pull --quiet "${image}" >/dev/null; then
+            docker run --rm --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --volume "${GITHUB_WORKSPACE}/workspace:/workspace:ro" \
+              --volume "${GITHUB_WORKSPACE}/source:/source:ro" \
+              "${image}" \
+              --workspace /workspace \
+              --source /source \
+              --config "${CONFIG}" \
+              --fail-on "${FAIL_ON}" \
+              --format json >"${result}" 2>"${stderr_file}" || status=$?
+          else
+            status=$?
+          fi
+
+          {
+            printf 'result=%s\n' "${result}"
+            printf 'stderr=%s\n' "${stderr_file}"
+            printf 'status=%s\n' "${status}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Project result into the pull request
+        id: render
+        if: always()
+        shell: bash
+        env:
+          PROCESS_STATUS: ${{ steps.evaluate.outputs.status }}
+          RESULT: ${{ steps.evaluate.outputs.result }}
+          STDERR_FILE: ${{ steps.evaluate.outputs.stderr }}
+          TEMPLATE_REF: ${{ inputs.template_ref }}
+          TEMPLATE_REPOSITORY: ${{ inputs.template_repository }}
+        run: |
+          set -euo pipefail
+          patch_file="${RUNNER_TEMP}/template-drift.patch"
+
+          if [[ ! "${PROCESS_STATUS}" =~ ^[012]$ ]] ||
+             [[ ! -s "${RESULT}" ]] || [[ -s "${STDERR_FILE}" ]]; then
+            printf '%s\n' '::error title=Workflow template drift::checker launch or output contract failed'
+            {
+              printf '%s\n\n' '### Workflow template drift'
+              printf 'Launcher/output failure (process status %s).\n' "${PROCESS_STATUS:-missing}"
+            } >>"${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          if ! jq -se --argjson process "${PROCESS_STATUS}" '
+            length == 1 and
+            .[0].version == 1 and
+            (
+              ($process == 2 and
+               .[0].status == "ERROR" and
+               (.[0].error | type == "object") and
+               (.[0].error.code | type == "string") and
+               (.[0].error.message | type == "string") and
+               ((.[0].error | has("path") | not) or
+                (.[0].error.path | type == "string")))
+              or
+              ($process != 2 and
+               (($process == 0 and (.[0].status == "PASS" or .[0].status == "WARNING")) or
+                ($process == 1 and .[0].status == "FAIL")) and
+               (.[0].findings | type == "array") and
+               all(.[0].findings[];
+                 (.target | type == "string") and
+                 (.mode | type == "string") and
+                 (.severity == "error" or .severity == "warning") and
+                 (.kind | type == "string") and
+                 (.fixable | type == "boolean") and
+                 (.details | type == "object")) and
+               (.[0].patch | type == "string"))
+            )
+          ' "${RESULT}" >/dev/null; then
+            printf '%s\n' '::error title=Workflow template drift::invalid checker result'
+            exit 1
+          fi
+
+          if [[ "${PROCESS_STATUS}" == 2 ]]; then
+            jq -r '
+              def data_escape:
+                gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+              "::error title=Workflow template drift::\((.error.code + ": " + .error.message +
+                (if .error.path then " (" + .error.path + ")" else "" end)) | data_escape)"
+            ' "${RESULT}"
+            {
+              printf '%s\n\n' '### Workflow template drift'
+              printf '%s\n\n' 'Checker returned an ERROR document:'
+              printf '%s\n' '```json'
+              jq . "${RESULT}"
+              printf '%s\n' '```'
+            } >>"${GITHUB_STEP_SUMMARY}"
+            exit 2
+          fi
+
+          jq -r '
+            def data_escape:
+              gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+            def property_escape:
+              data_escape | gsub(":"; "%3A") | gsub(","; "%2C");
+            .findings[:10][] |
+            "::\(.severity) file=\(.target | property_escape)::\((.mode + ": " + .kind +
+              "; fixable=" + (.fixable | tostring) + "; details=" + (.details | tojson)) | data_escape)"
+          ' "${RESULT}"
+
+          jq -j '.patch' "${RESULT}" >"${patch_file}"
+          if [[ -s "${patch_file}" ]]; then
+            printf '%s\n' 'has_patch=true' >>"${GITHUB_OUTPUT}"
+          else
+            printf '%s\n' 'has_patch=false' >>"${GITHUB_OUTPUT}"
+          fi
+          printf 'patch=%s\n' "${patch_file}" >>"${GITHUB_OUTPUT}"
+
+          {
+            printf '%s\n\n' '### Workflow template drift'
+            printf '| Field | Value |\n|---|---|\n'
+            printf '| Status | %s |\n' "$(jq -r '.status' "${RESULT}")"
+            printf '| Findings | %s |\n' "$(jq -r '.findings | length' "${RESULT}")"
+            printf '| Template | %s@%s |\n\n' "${TEMPLATE_REPOSITORY}" "${TEMPLATE_REF}"
+            printf '| Target | Mode | Severity | Kind | Fixable | Details |\n'
+            printf '|---|---|---|---|---|---|\n'
+            jq -r '
+              def cell:
+                tostring | @html | gsub("\\|"; "&#124;") |
+                gsub("\r"; "&#13;") | gsub("\n"; "<br>");
+              (.findings[:200][] |
+                "| \(.target | cell) | \(.mode | cell) | \(.severity | cell) | " +
+                "\(.kind | cell) | \(.fixable | cell) | \(.details | tojson | cell) |"),
+              (if (.findings | length) > 200 then
+                "| ... | ... | ... | ... | ... | \((.findings | length) - 200) additional findings omitted |"
+              else empty end)
+            ' "${RESULT}"
+            printf '\n%s\n\n' '#### Remediation patch'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+          if [[ -s "${patch_file}" ]]; then
+            display_patch="${RUNNER_TEMP}/template-drift-summary.patch"
+            jq -r '
+              .patch |
+              if length > 65536 then
+                .[:65536] + "\n[diff truncated after 65,536 characters; download the artifact for the complete patch]"
+              else . end
+            ' "${RESULT}" >"${display_patch}"
+            fence_length="$(awk '
+              {
+                rest = $0
+                while (match(rest, /~+/)) {
+                  if (RLENGTH > maximum) maximum = RLENGTH
+                  rest = substr(rest, RSTART + RLENGTH)
+                }
+              }
+              END { print maximum < 3 ? 3 : maximum + 1 }
+            ' "${display_patch}")"
+            fence="$(printf '%*s' "${fence_length}" '' | tr ' ' '~')"
+            {
+              printf '%sdiff\n' "${fence}"
+              cat "${display_patch}"
+              printf '%s\n' "${fence}"
+            } >>"${GITHUB_STEP_SUMMARY}"
+          else
+            printf '%s\n' 'No textual remediation patch was produced.' >>"${GITHUB_STEP_SUMMARY}"
+          fi
+
+          exit "${PROCESS_STATUS}"
+      - name: Upload remediation patch
+        if: ${{ always() && steps.render.outputs.has_patch == 'true' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: template-drift-patch
+          path: ${{ steps.render.outputs.patch }}
+          if-no-files-found: error
+          retention-days: 7
