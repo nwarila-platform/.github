@@ -1,0 +1,129 @@
+name: Workflow container sync report
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.5.2
+      - name: Verify image
+        id: image
+        env:
+          VERSION: "2.0.0" # renovate: datasource=docker depName=ghcr.io/nwarila-platform/workflow-template-drift
+        run: |
+          set -euo pipefail
+          image="ghcr.io/nwarila-platform/workflow-template-drift:${VERSION}"
+          identity="https://github.com/nwarila-platform/workflow-template-drift/.github/workflows/publish.yaml@refs/tags/v${VERSION}"
+          result=$(cosign verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com -o json "$image")
+          digest=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$result")
+          printf '%s\n' "$result"
+          printf 'ref=%s@%s\n' "${image%:*}" "$digest" >>"$GITHUB_OUTPUT"
+      - name: Report fleet drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          set -euo pipefail
+          die() { printf '::error::%s\n' "$*" >&2; exit 2; }
+          root="$RUNNER_TEMP/sync-report"
+          mkdir -p "$root"
+          report="$root/report.md"
+          printf '| repo | template | pinned | main | behind | files |\n|---|---|---|---|---:|---|\n' >"$report"
+          # shellcheck disable=SC2016
+          if ! gh api --paginate --method GET orgs/nwarila-platform/repos -f per_page=100 --jq '.[] | select(.private == false) | [.full_name,.default_branch] | @tsv' >"$root/repos"; then die 'cannot enumerate repositories'; fi
+          failed=0
+          consumer_index=0
+          while IFS=$'\t' read -r repository branch; do
+            error="$root/api.stderr"
+            endpoint="repos/$repository/contents/.github/.config/template-drift.lock?ref=$branch"
+            if ! content=$(gh api "$endpoint" --jq .content 2>"$error"); then
+              if grep -Eq '\(HTTP 404\)$' "$error"; then continue; fi
+              cat "$error" >&2
+              die "cannot read lock for $repository"
+            fi
+            if ! consumer_oid=$(gh api "repos/$repository/commits/$branch" --jq .sha); then die "cannot resolve $repository@$branch"; fi
+            [[ "$consumer_oid" =~ ^[0-9a-f]{40}$ ]] || die "invalid head OID for $repository"
+            endpoint="repos/$repository/contents/.github/.config/template-drift.lock?ref=$consumer_oid"
+            if ! content=$(gh api "$endpoint" --jq .content 2>"$error"); then
+              if grep -Eq '\(HTTP 404\)$' "$error"; then continue; fi
+              cat "$error" >&2
+              die "cannot read frozen lock for $repository"
+            fi
+            consumer="$root/consumer-$consumer_index"
+            mkdir -p "$consumer/templates"
+            printf '%s' "$content" | base64 -d >"$consumer/lock" || die "cannot decode lock for $repository"
+            python3 - "$consumer/lock" >"$consumer/pins" <<'PY'
+          import pathlib, re, sys
+          raw = pathlib.Path(sys.argv[1]).read_bytes()
+          if not raw or not raw.endswith(b"\n") or b"\r" in raw or b"\0" in raw or not raw.isascii():
+              raise SystemExit(2)
+          lines = raw.decode("ascii").splitlines()
+          pattern = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ([0-9a-f]{40})")
+          parsed = [pattern.fullmatch(line) for line in lines]
+          if any(match is None for match in parsed) or len({match[1].lower() for match in parsed}) != len(parsed):
+              raise SystemExit(2)
+          print("\n".join(lines))
+          PY
+            [[ -s "$consumer/pins" ]] || die "invalid lock for $repository"
+            git init -q "$consumer/workspace"
+            git -C "$consumer/workspace" remote add origin "https://github.com/$repository.git"
+            git -C "$consumer/workspace" fetch --quiet --depth=1 origin "$consumer_oid" || die "cannot fetch $repository@$consumer_oid"
+            git -C "$consumer/workspace" checkout --quiet --detach FETCH_HEAD
+            [[ $(git -C "$consumer/workspace" rev-parse HEAD) == "$consumer_oid" ]] || die "checkout OID mismatch for $repository"
+            mounts=(-v "$consumer/workspace:/workspace:ro")
+            args=()
+            : >"$consumer/rows"
+            template_index=0
+            while read -r template pinned extra; do
+              [[ -z "${extra:-}" ]] || die "invalid lock for $repository"
+              if ! metadata=$(gh api "repos/$template" --jq '[.default_branch,.private] | @tsv'); then die "cannot read metadata for $template"; fi
+              IFS=$'\t' read -r default private <<<"$metadata"
+              [[ -n "$default" && "$private" == false ]] || die "$template must be public"
+              if ! head=$(gh api "repos/$template/commits/$default" --jq .sha); then die "cannot resolve $template@$default"; fi
+              [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "invalid head OID for $template"
+              if ! comparison=$(gh api "repos/$template/compare/$pinned...$head" --jq '[.status,.ahead_by] | @tsv'); then die "cannot compare $template@$pinned"; fi
+              IFS=$'\t' read -r status behind <<<"$comparison"
+              [[ "$status" == ahead || "$status" == identical ]] || die "$template@$pinned is not reachable from $head"
+              [[ "$behind" =~ ^[0-9]+$ ]] || die "invalid comparison for $template"
+              (( behind == 0 )) || failed=1
+              directory="$consumer/templates/$template_index"
+              git init -q "$directory"
+              git -C "$directory" remote add origin "https://github.com/$template.git"
+              git -C "$directory" fetch --quiet --depth=1 origin "$head" || die "cannot fetch $template@$head"
+              git -C "$directory" checkout --quiet --detach FETCH_HEAD
+              [[ $(git -C "$directory" rev-parse HEAD) == "$head" ]] || die "checkout OID mismatch for $template"
+              mounts+=(-v "$directory:/templates/$template_index:ro")
+              args+=(--template "$template=/templates/$template_index")
+              printf '%s\t%s\t%s\t%s\t%s\n' "$repository" "$template" "$pinned" "$head" "$behind" >>"$consumer/rows"
+              template_index=$((template_index + 1))
+            done <"$consumer/pins"
+            chmod -R a+rX "$consumer/workspace" "$consumer/templates"
+            if docker run --quiet --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" --fail-on error --format patch >"$consumer/patch" 2>"$consumer/checker.stderr"; then checker=0; else checker=$?; fi
+            [[ "$checker" == 0 || "$checker" == 1 ]] || { cat "$consumer/checker.stderr" >&2; die "checker failed for $repository"; }
+            [[ ! -s "$consumer/checker.stderr" ]] || { cat "$consumer/checker.stderr" >&2; die "checker wrote stderr for $repository"; }
+            paths=()
+            : >"$consumer/numstat"
+            if [[ -s "$consumer/patch" ]]; then
+              git -C "$consumer/workspace" apply --numstat -z <"$consumer/patch" >"$consumer/numstat" || die "invalid checker patch for $repository"
+            fi
+            while IFS=$'\t' read -r -d '' _ _ path; do paths+=("$path"); done <"$consumer/numstat"
+            files=none
+            if (( ${#paths[@]} )); then printf -v files '%s, ' "${paths[@]}"; files=${files%, }; fi
+            # shellcheck disable=SC2016
+            while IFS=$'\t' read -r repo template pinned head behind; do
+              printf '| %s | %s | `%s` | `%s` | %s | %s |\n' "$repo" "$template" "$pinned" "$head" "$behind" "$files" >>"$report"
+            done <"$consumer/rows"
+            consumer_index=$((consumer_index + 1))
+          done <"$root/repos"
+          cat "$report" >>"$GITHUB_STEP_SUMMARY"
+          exit "$failed"

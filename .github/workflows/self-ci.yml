@@ -71,17 +71,17 @@ jobs:
           set -euo pipefail
           chmod -R a+rX .
           # renovate: datasource=docker depName=ghcr.io/nwarila-platform/workflow-template-drift
-          image='ghcr.io/nwarila-platform/workflow-template-drift:1.0.1@sha256:f969139e479618f59cb57d02053061c82bb5d89815a53d05ac878dffaea7e35d'
+          image='ghcr.io/nwarila-platform/workflow-template-drift:2.0.0@sha256:7c508dd855042863e6a1fa9ff0fcc6b44694d73f35030c7ec6032dc40e84b093'
           status=0
           docker run --quiet --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-            --volume "${PWD}:/workspace:ro" --volume "${PWD}:/source:ro" \
+            --volume "${PWD}:/workspace:ro" --volume "${PWD}:/template:ro" \
             "${image}" \
-            --workspace /workspace --source /source --config template-drift.json --fail-on error --format json \
-            > "${RUNNER_TEMP}/template-drift.result" 2> "${RUNNER_TEMP}/template-drift.stderr" || status=$?
+            --workspace /workspace --template nwarila-platform/.github=/template --config template-drift.json --fail-on error --format text \
+            > "${RUNNER_TEMP}/template-drift.report" 2> "${RUNNER_TEMP}/template-drift.stderr" || status=$?
+          [[ "${status}" == 0 || "${status}" == 1 ]]
           test ! -s "${RUNNER_TEMP}/template-drift.stderr"
-          test "${status}" -ne 2
-          jq -e '.version == 1 and (.status == "PASS" or .status == "WARNING" or .status == "FAIL")' "${RUNNER_TEMP}/template-drift.result" > /dev/null
-          printf 'template-drift.json is a valid version-3 configuration; checker status %s\n' "$(jq -r .status "${RUNNER_TEMP}/template-drift.result")"
+          tail -n 1 "${RUNNER_TEMP}/template-drift.report" | grep -Eq '^template-drift: (PASS|WARNING \([0-9]+ findings\)|FAIL \([0-9]+ findings, [0-9]+ fixable\))$'
+          printf 'template-drift.json is a valid version-3 configuration; checker summary: %s\n' "$(tail -n 1 "${RUNNER_TEMP}/template-drift.report")"
 
   adr-schema:
     name: validate ADR schema
