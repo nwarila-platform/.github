@@ -14,19 +14,27 @@
     {
       "matchPackageNames": ["ghcr.io/nwarila-platform/workflow-template-drift"],
       "minimumReleaseAge": null
+    },
+    {
+      // Legacy WTD3b callers keep the 1.x command line. Hold this workflow below 2.0.0
+      // until every caller migrates to workflow-containers.yaml.
+      "matchFileNames": [".github/workflows/reusable-template-drift.yaml"],
+      "matchPackageNames": ["ghcr.io/nwarila-platform/workflow-template-drift"],
+      "allowedVersions": "<2.0.0"
     }
   ],
 
   "customManagers": [
     {
-      // Keep the release tag and immutable manifest digest synchronized in both
-      // workflow execution sites.
+      // Track the checker image in the two digest-pinned execution sites and the
+      // digest-resolving sync report.
       "customType": "regex",
       "managerFilePatterns": [
-        "/^\\.github/workflows/(?:reusable-template-drift\\.yaml|self-ci\\.yml)$/"
+        "/^\\.github/workflows/(?:reusable-template-drift\\.yaml|self-ci\\.yml|sync-report\\.yaml)$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>docker) depName=(?<depName>ghcr\\.io/nwarila-platform/workflow-template-drift)\\r?\\n[ \\t]*image='ghcr\\.io/nwarila-platform/workflow-template-drift:(?<currentValue>[^@'\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})'"
+        "# renovate: datasource=(?<datasource>docker) depName=(?<depName>ghcr\\.io/nwarila-platform/workflow-template-drift)\\r?\\n[ \\t]*image='ghcr\\.io/nwarila-platform/workflow-template-drift:(?<currentValue>[^@'\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})'",
+        "VERSION: [\"'](?<currentValue>[^\"'\\s]+)[\"'][ \\t]+# renovate: datasource=(?<datasource>docker) depName=(?<depName>ghcr\\.io/nwarila-platform/workflow-template-drift)"
       ],
       "packageNameTemplate": "{{{depName}}}",
       "versioningTemplate": "docker"
