@@ -1,0 +1,180 @@
+# Purpose: Provide the single execution path for organization workflow containers.
+# Role: Accept a workflow container name and version, then verify, run, report, and restore its status.
+name: Run workflow container
+on:
+  workflow_call:
+    inputs:
+      name: {required: true, type: string}
+      version: {required: true, type: string}
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Validate image tuple
+        id: tuple
+        env: {NAME: "${{ inputs.name }}", VERSION: "${{ inputs.version }}"}
+        run: |
+          set -euo pipefail
+          if [[ ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::untrusted runner input tuple"
+            exit 2
+          fi
+          image="ghcr.io/nwarila-platform/workflow-${NAME}:${VERSION}"
+          identity="https://github.com/nwarila-platform/workflow-${NAME}/.github/workflows/publish.yaml@refs/tags/v${VERSION}"
+          printf 'image=%s\nidentity=%s\n' "$image" "$identity" >>"$GITHUB_OUTPUT"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {path: workspace, persist-credentials: false, fetch-depth: 1}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with: {cosign-release: v2.5.2}
+      - name: Verify image
+        id: image
+        env: {IMAGE: "${{ steps.tuple.outputs.image }}", IDENTITY: "${{ steps.tuple.outputs.identity }}"}
+        run: |
+          set -euo pipefail
+          result=$(cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com -o json "$IMAGE")
+          digest=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$result")
+          printf '%s\n' "$result"
+          printf 'ref=%s@%s\n' "${IMAGE%:*}" "$digest" >>"$GITHUB_OUTPUT"
+      - name: Prepare pinned inputs
+        env:
+          NAME: ${{ inputs.name }}
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          config=".github/.config/${NAME}.yaml"
+          lock=".github/.config/${NAME}.lock"
+          : >"$RUNNER_TEMP/pins"
+          mkdir -p templates
+          if [[ "$EVENT" == pull_request ]]; then
+            git -C workspace fetch --quiet --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" || { echo "::error::cannot fetch protected base"; exit 2; }
+            git -C workspace show "origin/$BASE:$config" >"$RUNNER_TEMP/identity" || { echo "::error::cannot read protected identity"; exit 2; }
+            git -C workspace show "origin/$BASE:$lock" >"$RUNNER_TEMP/base-lock" || { echo "::error::cannot read protected lock"; exit 2; }
+            identity="$RUNNER_TEMP/identity"
+            head="workspace/$lock"
+            base="$RUNNER_TEMP/base-lock"
+          else
+            [[ -e "workspace/$config" ]] || exit 0
+            identity="workspace/$config"
+            head="workspace/$lock"
+            base="workspace/$lock"
+          fi
+          python3 - "$identity" "$head" "$base" "$OWNER" "$REPOSITORY" "$EVENT" >"$RUNNER_TEMP/pins" <<'PY'
+          import re, sys
+          identity, head, base, owner, own, event = sys.argv[1:]
+          def fail(message): print(f"::error::{message}", file=sys.stderr); raise SystemExit(2)
+          def read(path):
+              raw = open(path, "rb").read()
+              if not raw.endswith(b"\n") or b"\r" in raw or b"\0" in raw: fail(f"invalid LF grammar: {path}")
+              try: return raw.decode("ascii").splitlines()
+              except UnicodeDecodeError: fail(f"non-ASCII input: {path}")
+          def main():
+              lines = read(identity)
+              item = re.compile(r"  - ([A-Za-z0-9_.-]+)(?:/([A-Za-z0-9_.-]+))?")
+              if not lines or lines[0] != "templates:" or any(not item.fullmatch(x) for x in lines[1:]): fail("invalid identity grammar")
+              templates = []
+              for line in lines[1:]:
+                  match = item.fullmatch(line)
+                  templates.append(f"{match[1]}/{match[2]}" if match[2] else f"{owner}/{match[1]}")
+              folded = [x.lower() for x in templates]
+              if not templates or len(set(folded)) != len(folded): fail("identity entries must be nonempty and unique")
+              expected = [x for x in templates if x.lower() != own.lower()]
+              def locks(path):
+                  result = []
+                  for line in read(path):
+                      match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ([0-9a-f]{40})", line)
+                      if not match: fail(f"invalid lock grammar: {path}")
+                      result.append(match.groups())
+                  if [x for x, _ in result] != expected: fail(f"lock list does not match protected identity: {path}")
+                  return dict(result)
+              new, old = locks(head), locks(base)
+              for repo in expected: print(repo, new[repo], old[repo] if event == "pull_request" else "-")
+          try: main()
+          except SystemExit: raise
+          except Exception: fail("cannot read pinned inputs")
+          PY
+          index=0
+          while read -r repo oid old; do
+            directory="templates/$index"
+            git init -q "$directory"
+            git -C "$directory" remote add origin "https://github.com/$repo.git"
+            git -C "$directory" fetch --quiet --depth=1 origin "$oid" || { echo "::error::cannot fetch $repo@$oid"; exit 2; }
+            git -C "$directory" checkout --quiet --detach FETCH_HEAD
+            [[ $(git -C "$directory" rev-parse HEAD) == "$oid" ]] || { echo "::error::checkout OID mismatch for $repo"; exit 2; }
+            read -r default private < <(gh api "repos/$repo" --jq '[.default_branch,.private] | @tsv') || { echo "::error::cannot read metadata for $repo"; exit 2; }
+            [[ "$private" == false ]] || { echo "::error::$repo must be public"; exit 2; }
+            status=$(gh api "repos/$repo/compare/$oid...$default" --jq .status) || { echo "::error::cannot prove reachability for $repo@$oid"; exit 2; }
+            [[ "$status" == ahead || "$status" == identical ]] || { echo "::error::$repo@$oid is not reachable from $default"; exit 2; }
+            if [[ "$EVENT" == pull_request ]]; then
+              status=$(gh api "repos/$repo/compare/$old...$oid" --jq .status) || { echo "::error::cannot prove non-rewind for $repo"; exit 2; }
+              [[ "$status" == ahead || "$status" == identical ]] || { echo "::error::lock rewinds $repo"; exit 2; }
+            fi
+            index=$((index + 1))
+          done <"$RUNNER_TEMP/pins"
+      - name: Evaluate
+        id: evaluate
+        env: {NAME: "${{ inputs.name }}", IMAGE: "${{ steps.image.outputs.ref }}"}
+        run: |
+          set -euo pipefail
+          chmod -R a+rX workspace templates
+          docker pull --quiet "$IMAGE" >/dev/null
+          mounts=()
+          args=()
+          index=0
+          while read -r repo _ _; do
+            mounts+=(-v "$PWD/templates/$index:/templates/$index:ro")
+            args+=(--template "$repo=/templates/$index")
+            index=$((index + 1))
+          done <"$RUNNER_TEMP/pins"
+          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" --fail-on error --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
+          if [[ ! "$status" =~ ^[012]$ ]]; then status=2; fi
+          if [[ "$status" -eq 0 ]]; then
+            summary=$(tail -n 1 report.txt)
+            expected="^${NAME}: (PASS|WARNING \\([0-9]+ findings\\))$"
+            if [[ ! "$summary" =~ $expected ]]; then status=2; fi
+          fi
+          patch="${NAME}.patch"
+          if [[ "$status" -eq 1 ]]; then
+            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" --fail-on error --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
+            if [[ ! "$patch_status" =~ ^[012]$ ]]; then patch_status=2; fi
+            if [[ "$patch_status" -ne 1 ]]; then status=2; fi
+          fi
+          printf '{"problemMatcher":[{"owner":"workflow-containers","pattern":[{"regexp":"^(error|warning): ([^:]+?): (.*)$","severity":1,"file":2,"message":3}]}]}\n' >"$RUNNER_TEMP/matcher.json"
+          echo "::add-matcher::$RUNNER_TEMP/matcher.json"
+          cat report.txt
+          cat error.txt >&2
+          if [[ ! -f "$patch" ]]; then : >"$patch"; fi
+          python3 - "$NAME" report.txt "$patch" "$RUNNER_TEMP/comment.md" <<'PY'
+          import pathlib, sys
+          name, report, patch, output = sys.argv[1], *map(pathlib.Path, sys.argv[2:]); diff = patch.read_text(errors="replace")
+          text = f"### {name}\n\n```text\n" + report.read_text(errors="replace") + "```\n\n```diff\n" + diff[:65536]
+          if len(diff) > 65536: text += "\n[patch truncated after 65,536 characters; download the artifact for the complete patch]"
+          output.write_text(text + "\n```\n")
+          PY
+          cat "$RUNNER_TEMP/comment.md" >>"$GITHUB_STEP_SUMMARY"
+          if [[ -s "$patch" ]]; then has_patch=true; else has_patch=false; fi
+          printf 'status=%s\nhas_patch=%s\npatch=%s\ncomment=%s\n' "$status" "$has_patch" "$patch" "$RUNNER_TEMP/comment.md" >>"$GITHUB_OUTPUT"
+      - if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.evaluate.outputs.status != '0'
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with: {header: "${{ inputs.name }}", path: "${{ steps.evaluate.outputs.comment }}"}
+      - if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.evaluate.outputs.status == '0'
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with: {header: "${{ inputs.name }}", delete: true}
+      - if: steps.evaluate.outputs.has_patch == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with: {name: "${{ inputs.name }}-patch", path: "${{ steps.evaluate.outputs.patch }}", retention-days: 7}
+      - name: Restore checker status
+        env:
+          STATUS: ${{ steps.evaluate.outputs.status }}
+        run: exit "$STATUS"
