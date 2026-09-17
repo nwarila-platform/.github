@@ -6,6 +6,8 @@ on:
     inputs:
       name: {required: true, type: string}
       version: {required: true, type: string}
+permissions:
+  contents: read
 jobs:
   check:
     name: check
