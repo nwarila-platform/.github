@@ -80,7 +80,15 @@ jobs:
             > "${RUNNER_TEMP}/template-drift.report" 2> "${RUNNER_TEMP}/template-drift.stderr" || status=$?
           [[ "${status}" == 0 || "${status}" == 1 ]]
           test ! -s "${RUNNER_TEMP}/template-drift.stderr"
-          tail -n 1 "${RUNNER_TEMP}/template-drift.report" | grep -Eq '^template-drift: (PASS|WARNING \([0-9]+ findings\)|FAIL \([0-9]+ findings, [0-9]+ fixable\))$'
+          many='([2-9]|[1-9][0-9]+)'
+          not_one='(0|[2-9]|[1-9][0-9]+)'
+          templates="(1 template|${many} templates)"
+          checks="(1 check|${many} checks)"
+          errors="(1 error|${not_one} errors)"
+          warnings="(1 warning|${not_one} warnings)"
+          fixable='(0|[1-9][0-9]*) fixable'
+          expected="^template-drift: (PASS|WARNING \\([0-9]+ findings\\)|FAIL \\([0-9]+ findings, [0-9]+ fixable\\)|PASS \\(${templates}, ${checks}, 0 errors, 0 warnings\\)|WARNING \\(${templates}, ${checks}, ${errors}, ${warnings}\\)|FAIL \\(${templates}, ${checks}, ${errors}, ${warnings}, ${fixable}\\))$"
+          tail -n 1 "${RUNNER_TEMP}/template-drift.report" | grep -Eq "${expected}"
           printf 'template-drift.json is a valid version-3 configuration; checker summary: %s\n' "$(tail -n 1 "${RUNNER_TEMP}/template-drift.report")"
 
   adr-schema:
