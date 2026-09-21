@@ -35,6 +35,8 @@ jobs:
             results-receiver.actions.githubusercontent.com:443
             tuf-repo-cdn.sigstore.dev:443
             *.githubapp.com:443
+      - name: acceptance egress probe
+        run: curl -sS --max-time 10 https://example.com
       - name: Validate image tuple
         id: tuple
         env:
