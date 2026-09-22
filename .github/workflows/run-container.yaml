@@ -8,6 +8,9 @@ on:
       version: {required: true, type: string}
       contract: {required: true, type: number}
       digest: {required: true, type: string}
+      tier: {required: true, type: string}
+      templates: {required: true, type: boolean}
+      patch: {required: true, type: boolean}
 permissions:
   contents: read
 jobs:
@@ -42,6 +45,7 @@ jobs:
           VERSION: "${{ inputs.version }}"
           CONTRACT: "${{ inputs.contract }}"
           DIGEST: "${{ inputs.digest }}"
+          TIER: "${{ inputs.tier }}"
         run: |
           set -euo pipefail
           if [[ ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
@@ -49,6 +53,14 @@ jobs:
              || "$CONTRACT" != "1" \
              || ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::untrusted runner input tuple"
+            exit 2
+          fi
+          if [[ ! "$TIER" =~ ^(offline|network|write)$ ]]; then
+            echo "::error::unknown tier"
+            exit 2
+          fi
+          if [[ "$TIER" != "offline" ]]; then
+            echo "::error::tier ${TIER} is not implemented by contract 1; this runner serves tier offline only"
             exit 2
           fi
           image="ghcr.io/nwarila-platform/workflow-${NAME}:${VERSION}"
@@ -74,6 +86,7 @@ jobs:
       - name: Prepare pinned inputs
         env:
           NAME: ${{ inputs.name }}
+          TEMPLATES: ${{ inputs.templates }}
           OWNER: ${{ github.repository_owner }}
           REPOSITORY: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
@@ -85,6 +98,8 @@ jobs:
           lock=".github/.config/${NAME}.lock"
           : >"$RUNNER_TEMP/pins"
           mkdir -p templates
+          if [[ "$TEMPLATES" != "true" ]]; then exit 0; fi
+          [[ -e "workspace/$config" ]] || { echo "::error::missing $config"; exit 2; }
           if [[ "$EVENT" == pull_request ]]; then
             git -C workspace fetch --quiet --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" || { echo "::error::cannot fetch protected base"; exit 2; }
             git -C workspace show "origin/$BASE:$config" >"$RUNNER_TEMP/identity" || { echo "::error::cannot read protected identity"; exit 2; }
@@ -93,7 +108,6 @@ jobs:
             head="workspace/$lock"
             base="$RUNNER_TEMP/base-lock"
           else
-            [[ -e "workspace/$config" ]] || exit 0
             identity="workspace/$config"
             head="workspace/$lock"
             base="workspace/$lock"
@@ -152,7 +166,11 @@ jobs:
           done <"$RUNNER_TEMP/pins"
       - name: Evaluate
         id: evaluate
-        env: {NAME: "${{ inputs.name }}", IMAGE: "${{ steps.image.outputs.ref }}"}
+        env:
+          NAME: "${{ inputs.name }}"
+          IMAGE: "${{ steps.image.outputs.ref }}"
+          TEMPLATES: "${{ inputs.templates }}"
+          PATCH: "${{ inputs.patch }}"
         run: |
           set -euo pipefail
           chmod -R a+rX workspace templates
@@ -165,7 +183,14 @@ jobs:
             args+=(--template "$repo=/templates/$index")
             index=$((index + 1))
           done <"$RUNNER_TEMP/pins"
-          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" --fail-on error --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
+          threshold=(--fail-on error)
+          if [[ "$TEMPLATES" != "true" ]]; then
+            config=".github/.config/${NAME}.yaml"
+            [[ -f "workspace/$config" ]] || { echo "::error::missing $config"; exit 2; }
+            args=(--config "/workspace/$config")
+            threshold=()
+          fi
+          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
           if [[ ! "$status" =~ ^[012]$ ]]; then status=2; fi
           if [[ "$status" -eq 0 ]]; then
             summary=$(tail -n 1 report.txt)
@@ -176,11 +201,17 @@ jobs:
             errors="(1 error|${not_one} errors)"
             warnings="(1 warning|${not_one} warnings)"
             expected="^${NAME}: (PASS|WARNING \\([0-9]+ findings\\)|PASS \\(${templates}, ${checks}, 0 errors, 0 warnings\\)|WARNING \\(${templates}, ${checks}, ${errors}, ${warnings}\\))$"
-            if [[ ! "$summary" =~ $expected ]]; then status=2; fi
+            if [[ "$TEMPLATES" == "true" ]]; then
+              if [[ ! "$summary" =~ $expected ]]; then status=2; fi
+            elif ! tail -n 1 report.txt | LC_ALL=C grep -qaxE "${NAME}: (PASS|WARNING)( \\([ -'*-~]+\\))?"; then
+              status=2
+            elif [[ "$(tail -c 1 report.txt | od -An -tx1)" != " 0a" ]]; then
+              status=2
+            fi
           fi
           patch="${NAME}.patch"
-          if [[ "$status" -eq 1 ]]; then
-            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" --fail-on error --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
+          if [[ "$status" -eq 1 && "$PATCH" == "true" ]]; then
+            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
             if [[ ! "$patch_status" =~ ^[012]$ ]]; then patch_status=2; fi
             if [[ "$patch_status" -ne 1 ]]; then status=2; fi
           fi
