@@ -6,6 +6,8 @@ on:
     inputs:
       name: {required: true, type: string}
       version: {required: true, type: string}
+      contract: {required: true, type: number}
+      digest: {required: true, type: string}
 permissions:
   contents: read
 jobs:
@@ -15,17 +17,37 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: write
+      security-events: write # Required by A14 for SARIF from the single runner job.
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            ghcr.io:443
+            github.com:443
+            pkg-containers.githubusercontent.com:443
+            prod.app-api.stepsecurity.io:443
+            productionresultssa*.blob.core.windows.net:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            rekor.sigstore.dev:443
+            results-receiver.actions.githubusercontent.com:443
+            tuf-repo-cdn.sigstore.dev:443
+            *.githubapp.com:443
       - name: Validate image tuple
         id: tuple
-        env: {NAME: "${{ inputs.name }}", VERSION: "${{ inputs.version }}"}
+        env:
+          NAME: "${{ inputs.name }}"
+          VERSION: "${{ inputs.version }}"
+          CONTRACT: "${{ inputs.contract }}"
+          DIGEST: "${{ inputs.digest }}"
         run: |
           set -euo pipefail
-          if [[ ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+          if [[ ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
+             || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ \
+             || "$CONTRACT" != "1" \
+             || ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::untrusted runner input tuple"
             exit 2
           fi
@@ -38,11 +60,15 @@ jobs:
         with: {cosign-release: v2.5.2}
       - name: Verify image
         id: image
-        env: {IMAGE: "${{ steps.tuple.outputs.image }}", IDENTITY: "${{ steps.tuple.outputs.identity }}"}
+        env:
+          IMAGE: "${{ steps.tuple.outputs.image }}"
+          IDENTITY: "${{ steps.tuple.outputs.identity }}"
+          DIGEST: "${{ inputs.digest }}"
         run: |
           set -euo pipefail
           result=$(cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com -o json "$IMAGE")
           digest=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$result")
+          [[ "$digest" == "$DIGEST" ]] || { echo "::error::image digest does not match the pinned digest"; exit 2; }
           printf '%s\n' "$result"
           printf 'ref=%s@%s\n' "${IMAGE%:*}" "$digest" >>"$GITHUB_OUTPUT"
       - name: Prepare pinned inputs
@@ -172,10 +198,7 @@ jobs:
           PY
           cat "$RUNNER_TEMP/comment.md" >>"$GITHUB_STEP_SUMMARY"
           if [[ -s "$patch" ]]; then has_patch=true; else has_patch=false; fi
-          printf 'status=%s\nhas_patch=%s\npatch=%s\ncomment=%s\n' "$status" "$has_patch" "$patch" "$RUNNER_TEMP/comment.md" >>"$GITHUB_OUTPUT"
-      - if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        with: {header: "${{ inputs.name }}", path: "${{ steps.evaluate.outputs.comment }}", skip_unchanged: true}
+          printf 'status=%s\nhas_patch=%s\npatch=%s\n' "$status" "$has_patch" "$patch" >>"$GITHUB_OUTPUT"
       - if: steps.evaluate.outputs.has_patch == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with: {name: "${{ inputs.name }}-patch", path: "${{ steps.evaluate.outputs.patch }}", retention-days: 7}
