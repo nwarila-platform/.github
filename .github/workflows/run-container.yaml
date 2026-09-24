@@ -48,7 +48,8 @@ jobs:
           TIER: "${{ inputs.tier }}"
         run: |
           set -euo pipefail
-          if [[ ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
+          if [[ ${#NAME} -gt 91 \
+             || ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
              || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ \
              || "$CONTRACT" != "1" \
              || ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -190,7 +191,7 @@ jobs:
             args=(--config "/workspace/$config")
             threshold=()
           fi
-          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
+          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700,uid=65532,gid=65532 --tmpfs /home/nonroot:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=65532,gid=65532 -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
           if [[ ! "$status" =~ ^[012]$ ]]; then status=2; fi
           if [[ "$status" -eq 0 ]]; then
             summary=$(tail -n 1 report.txt)
@@ -211,7 +212,7 @@ jobs:
           fi
           patch="${NAME}.patch"
           if [[ "$status" -eq 1 && "$PATCH" == "true" ]]; then
-            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
+            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700,uid=65532,gid=65532 --tmpfs /home/nonroot:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=65532,gid=65532 -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
             if [[ ! "$patch_status" =~ ^[012]$ ]]; then patch_status=2; fi
             if [[ "$patch_status" -ne 1 ]]; then status=2; fi
           fi
@@ -221,10 +222,28 @@ jobs:
           cat error.txt >&2
           if [[ ! -f "$patch" ]]; then : >"$patch"; fi
           python3 - "$NAME" report.txt "$patch" "$RUNNER_TEMP/comment.md" <<'PY'
-          import pathlib, sys
-          name, report, patch, output = sys.argv[1], *map(pathlib.Path, sys.argv[2:]); diff = patch.read_text(errors="replace")
-          text = f"### {name}\n\n```text\n" + report.read_text(errors="replace") + "```\n"
-          if diff: text += "\n#### Suggested fix\n\n```diff\n" + diff[:65536] + ("\n[patch truncated after 65,536 characters; download the artifact for the complete patch]" if len(diff) > 65536 else "") + "\n```\n"
+          import pathlib, re, sys
+          LIMIT = 65536
+          def read_limited(path):
+              with path.open(errors="replace") as source:
+                  return source.read(LIMIT + 1)
+          def block(kind, body, noun, destination):
+              truncated = len(body) > LIMIT
+              if truncated:
+                  body = body[:LIMIT]
+              if body and not body.endswith("\n"):
+                  body += "\n"
+              runs = [len(m.group(0)) for m in re.finditer(r"`+", body)]
+              f = "`" * max(3, (max(runs) + 1) if runs else 3)
+              text = f"{f}{kind}\n{body}{f}\n"
+              if truncated:
+                  text += f"\n> **{noun.capitalize()} truncated after {LIMIT} characters; {destination}.**\n"
+              return text
+          name, report, patch, output = sys.argv[1], *map(pathlib.Path, sys.argv[2:])
+          diff = read_limited(patch)
+          text = f"### {name}\n\n" + block("text", read_limited(report), "report", "see the Evaluate step log for the complete report")
+          if diff:
+              text += "\n#### Suggested fix\n\n" + block("diff", diff, "patch", "download the artifact for the complete patch")
           output.write_text(text)
           PY
           cat "$RUNNER_TEMP/comment.md" >>"$GITHUB_STEP_SUMMARY"
