@@ -48,7 +48,8 @@ jobs:
           TIER: "${{ inputs.tier }}"
         run: |
           set -euo pipefail
-          if [[ ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
+          if [[ ${#NAME} -gt 91 \
+             || ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
              || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ \
              || "$CONTRACT" != "1" \
              || ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -184,13 +185,18 @@ jobs:
             index=$((index + 1))
           done <"$RUNNER_TEMP/pins"
           threshold=(--fail-on error)
+          labels=$(docker image inspect --format '{{json .Config.Labels}}' "$IMAGE")
+          scratch=()
+          if jq -e '.["org.nwarila.workflow.scratch"] == "true"' <<<"$labels" >/dev/null; then
+            scratch=(--tmpfs "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777" --tmpfs "/home/nonroot:rw,nosuid,nodev,noexec,size=16m,mode=1777")
+          fi
           if [[ "$TEMPLATES" != "true" ]]; then
             config=".github/.config/${NAME}.yaml"
             [[ -f "workspace/$config" ]] || { echo "::error::missing $config"; exit 2; }
             args=(--config "/workspace/$config")
             threshold=()
           fi
-          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
+          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges "${scratch[@]}" -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
           if [[ ! "$status" =~ ^[012]$ ]]; then status=2; fi
           if [[ "$status" -eq 0 ]]; then
             summary=$(tail -n 1 report.txt)
@@ -211,7 +217,7 @@ jobs:
           fi
           patch="${NAME}.patch"
           if [[ "$status" -eq 1 && "$PATCH" == "true" ]]; then
-            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
+            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges "${scratch[@]}" -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
             if [[ ! "$patch_status" =~ ^[012]$ ]]; then patch_status=2; fi
             if [[ "$patch_status" -ne 1 ]]; then status=2; fi
           fi
@@ -220,15 +226,16 @@ jobs:
           cat report.txt
           cat error.txt >&2
           if [[ ! -f "$patch" ]]; then : >"$patch"; fi
-          python3 - "$NAME" report.txt "$patch" "$RUNNER_TEMP/comment.md" <<'PY'
-          import pathlib, sys
-          name, report, patch, output = sys.argv[1], *map(pathlib.Path, sys.argv[2:]); diff = patch.read_text(errors="replace")
-          text = f"### {name}\n\n```text\n" + report.read_text(errors="replace") + "```\n"
-          if diff: text += "\n#### Suggested fix\n\n```diff\n" + diff[:65536] + ("\n[patch truncated after 65,536 characters; download the artifact for the complete patch]" if len(diff) > 65536 else "") + "\n```\n"
-          output.write_text(text)
-          PY
-          cat "$RUNNER_TEMP/comment.md" >>"$GITHUB_STEP_SUMMARY"
           if [[ -s "$patch" ]]; then has_patch=true; else has_patch=false; fi
+          case "$status" in
+            0) result='passed' ;;
+            1) result='failed' ;;
+            *) result='could not complete' ;;
+          esac
+          {
+            printf '### %s\n\nThe check %s. The full report is in the log of the Evaluate step.\n' "$NAME" "$result"
+            if [[ "$has_patch" == true ]]; then printf 'A suggested fix is attached as the artifact %s-patch.\n' "$NAME"; fi
+          } >>"$GITHUB_STEP_SUMMARY"
           printf 'status=%s\nhas_patch=%s\npatch=%s\n' "$status" "$has_patch" "$patch" >>"$GITHUB_OUTPUT"
       - if: steps.evaluate.outputs.has_patch == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
