@@ -1,5 +1,12 @@
-# Purpose: Provide the single execution path for organization workflow containers.
-# Role: Accept a workflow container name and version, then verify, run, report, and restore its status.
+# Purpose: Run one workflow container built by nwarila-platform/workflow-container-factory (contract 2).
+# Role: Check the inputs, verify the factory's signature for exactly this name, version and digest, and
+# check that the version tag points at that digest. Then read the image's five requirement labels and
+# grant only what they declare: scratch space, and the pinned templates mounted read-only. Refuse full
+# history, SARIF and a built-image input, which contract 2 does not provide yet. Run the container
+# offline, check its report, and restore its status.
+# With expect: refuse (acceptance tests only), stop after the checks, never run the container, and
+# succeed only if a check refused the image.
+# Contract 1 is this file at commit 0188f9cc9d325aaa1d173286da9a2ba99210b09c of this repository.
 name: Run workflow container
 on:
   workflow_call:
@@ -8,9 +15,7 @@ on:
       version: {required: true, type: string}
       contract: {required: true, type: number}
       digest: {required: true, type: string}
-      tier: {required: true, type: string}
-      templates: {required: true, type: boolean}
-      patch: {required: true, type: boolean}
+      expect: {required: false, type: string, default: pass}
 permissions:
   contents: read
 jobs:
@@ -39,55 +44,164 @@ jobs:
             tuf-repo-cdn.sigstore.dev:443
             *.githubapp.com:443
       - name: Validate image tuple
-        id: tuple
+        id: validation
+        continue-on-error: ${{ inputs.expect == 'refuse' }}
         env:
           NAME: "${{ inputs.name }}"
           VERSION: "${{ inputs.version }}"
           CONTRACT: "${{ inputs.contract }}"
           DIGEST: "${{ inputs.digest }}"
-          TIER: "${{ inputs.tier }}"
+          EXPECT: "${{ inputs.expect }}"
         run: |
           set -euo pipefail
-          if [[ ${#NAME} -gt 91 \
-             || ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ \
-             || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ \
-             || "$CONTRACT" != "1" \
-             || ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::untrusted runner input tuple"
+          refuse() {
+            printf '%s\n' "$1" >&2
+            printf 'reason=%s\n' "$1" >>"$GITHUB_OUTPUT"
             exit 2
+          }
+          if [[ ${#NAME} -gt 91 || ! "$NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+            refuse 'input validation: invalid name'
           fi
-          if [[ ! "$TIER" =~ ^(offline|network|write)$ ]]; then
-            echo "::error::unknown tier"
-            exit 2
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            refuse 'input validation: version must be strict X.Y.Z'
           fi
-          if [[ "$TIER" != "offline" ]]; then
-            echo "::error::tier ${TIER} is not implemented by contract 1; this runner serves tier offline only"
-            exit 2
+          if [[ "$CONTRACT" != "2" ]]; then
+            refuse 'input validation: contract must be 2'
           fi
-          image="ghcr.io/nwarila-platform/workflow-${NAME}:${VERSION}"
-          identity="https://github.com/nwarila-platform/workflow-${NAME}/.github/workflows/publish.yaml@refs/tags/v${VERSION}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            refuse 'input validation: invalid digest'
+          fi
+          if [[ "$EXPECT" != "pass" && "$EXPECT" != "refuse" ]]; then
+            refuse 'input validation: expect must be pass or refuse'
+          fi
+          image="ghcr.io/nwarila-platform/workflow-${NAME}"
+          identity="https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/${NAME}/v${VERSION}"
           printf 'image=%s\nidentity=%s\n' "$image" "$identity" >>"$GITHUB_OUTPUT"
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - if: steps.validation.outcome == 'success'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {path: workspace, persist-credentials: false, fetch-depth: 1}
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - if: steps.validation.outcome == 'success'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with: {cosign-release: v2.5.2}
-      - name: Verify image
-        id: image
+      - name: Verify factory signature and tag
+        id: signature
+        if: steps.validation.outcome == 'success'
+        continue-on-error: ${{ inputs.expect == 'refuse' }}
         env:
-          IMAGE: "${{ steps.tuple.outputs.image }}"
-          IDENTITY: "${{ steps.tuple.outputs.identity }}"
+          NAME: "${{ inputs.name }}"
+          IMAGE: "${{ steps.validation.outputs.image }}"
+          IDENTITY: "${{ steps.validation.outputs.identity }}"
+          VERSION: "${{ inputs.version }}"
           DIGEST: "${{ inputs.digest }}"
         run: |
           set -euo pipefail
-          result=$(cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com -o json "$IMAGE")
-          digest=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$result")
-          [[ "$digest" == "$DIGEST" ]] || { echo "::error::image digest does not match the pinned digest"; exit 2; }
-          printf '%s\n' "$result"
-          printf 'ref=%s@%s\n' "${IMAGE%:*}" "$digest" >>"$GITHUB_OUTPUT"
+          refuse() {
+            printf '%s\n' "$1" >&2
+            printf 'reason=%s\n' "$1" >>"$GITHUB_OUTPUT"
+            exit 2
+          }
+          verify() {
+            local reference=$1 output=$2 error=$3 status
+            set +e
+            cosign verify "$reference" \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
+              --certificate-github-workflow-ref "refs/tags/${NAME}/v${VERSION}" \
+              -o json >"$output" 2>"$error"
+            status=$?
+            set -e
+            cat "$output"
+            cat "$error" >&2
+            return "$status"
+          }
+          digest_result="$RUNNER_TEMP/digest-verification.json"
+          digest_error="$RUNNER_TEMP/digest-verification.err"
+          if ! verify "$IMAGE@$DIGEST" "$digest_result" "$digest_error"; then
+            if grep -Fq 'no matching signatures' "$digest_result" "$digest_error"; then
+              refuse 'signature verification: no matching signatures'
+            fi
+            exit 2
+          fi
+          verified=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' "$digest_result") || refuse 'signature verification: invalid verification result'
+          [[ "$verified" == "$DIGEST" ]] || refuse 'signature verification: image digest does not match the pinned digest'
+
+          tag_result="$RUNNER_TEMP/tag-verification.json"
+          tag_error="$RUNNER_TEMP/tag-verification.err"
+          if ! verify "$IMAGE:$VERSION" "$tag_result" "$tag_error"; then
+            if grep -Fq 'no matching signatures' "$tag_result" "$tag_error"; then
+              refuse 'signature verification: no matching signatures'
+            fi
+            exit 2
+          fi
+          verified=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' "$tag_result") || refuse 'signature verification: invalid verification result'
+          [[ "$verified" == "$DIGEST" ]] || refuse 'signature verification: version tag does not match the pinned digest'
+          printf 'ref=%s@%s\n' "$IMAGE" "$DIGEST" >>"$GITHUB_OUTPUT"
+      - name: Check declared requirements
+        id: labels
+        if: steps.signature.outcome == 'success'
+        continue-on-error: ${{ inputs.expect == 'refuse' }}
+        env:
+          IMAGE: "${{ steps.signature.outputs.ref }}"
+        run: |
+          set -euo pipefail
+          refuse() {
+            printf '%s\n' "$1" >&2
+            printf 'reason=%s\n' "$1" >>"$GITHUB_OUTPUT"
+            exit 2
+          }
+          docker pull --quiet "$IMAGE" >/dev/null
+          labels=$(docker image inspect --format '{{json .Config.Labels}}' "$IMAGE")
+          requirements=(scratch second-input full-history sarif image-input)
+          for requirement in "${requirements[@]}"; do
+            key="org.nwarila.workflow.${requirement}"
+            if ! jq -e --arg key "$key" 'has($key)' <<<"$labels" >/dev/null; then
+              refuse "label check: missing $key"
+            fi
+            value=$(jq -er --arg key "$key" '.[$key] | select(. == "true" or . == "false")' <<<"$labels") || refuse "label check: invalid $key"
+            if [[ "$value" == "true" && "$requirement" =~ ^(full-history|sarif|image-input)$ ]]; then
+              refuse "label check: declared requirement $requirement is not provided by contract 2 yet"
+            fi
+            printf '%s=%s\n' "${requirement//-/_}" "$value" >>"$GITHUB_OUTPUT"
+          done
+      - name: Decide refusal expectation
+        if: always()
+        env:
+          EXPECT: "${{ inputs.expect }}"
+          VALIDATION_OUTCOME: "${{ steps.validation.outcome }}"
+          VALIDATION_REASON: "${{ steps.validation.outputs.reason }}"
+          SIGNATURE_OUTCOME: "${{ steps.signature.outcome }}"
+          SIGNATURE_REASON: "${{ steps.signature.outputs.reason }}"
+          LABEL_OUTCOME: "${{ steps.labels.outcome }}"
+          LABEL_REASON: "${{ steps.labels.outputs.reason }}"
+        run: |
+          set -euo pipefail
+          if [[ "$EXPECT" != "refuse" ]]; then
+            [[ "$VALIDATION_OUTCOME" == success && "$SIGNATURE_OUTCOME" == success && "$LABEL_OUTCOME" == success ]]
+            exit
+          fi
+          if [[ "$VALIDATION_OUTCOME" == failure && -n "$VALIDATION_REASON" ]]; then
+            printf 'expected refusal observed: %s\n' "$VALIDATION_REASON"
+            exit 0
+          fi
+          [[ "$VALIDATION_OUTCOME" == success ]] || exit 2
+          if [[ "$SIGNATURE_OUTCOME" == failure && -n "$SIGNATURE_REASON" ]]; then
+            printf 'expected refusal observed: %s\n' "$SIGNATURE_REASON"
+            exit 0
+          fi
+          [[ "$SIGNATURE_OUTCOME" == success ]] || exit 2
+          if [[ "$LABEL_OUTCOME" == failure && -n "$LABEL_REASON" ]]; then
+            printf 'expected refusal observed: %s\n' "$LABEL_REASON"
+            exit 0
+          fi
+          [[ "$LABEL_OUTCOME" == success ]] || exit 2
+          echo 'expected a refusal, but the image was accepted' >&2
+          exit 2
       - name: Prepare pinned inputs
+        if: inputs.expect == 'pass' && steps.labels.outcome == 'success'
         env:
           NAME: ${{ inputs.name }}
-          TEMPLATES: ${{ inputs.templates }}
+          TEMPLATES: ${{ steps.labels.outputs.second_input }}
           OWNER: ${{ github.repository_owner }}
           REPOSITORY: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
@@ -167,11 +281,12 @@ jobs:
           done <"$RUNNER_TEMP/pins"
       - name: Evaluate
         id: evaluate
+        if: inputs.expect == 'pass' && steps.labels.outcome == 'success'
         env:
           NAME: "${{ inputs.name }}"
-          IMAGE: "${{ steps.image.outputs.ref }}"
-          TEMPLATES: "${{ inputs.templates }}"
-          PATCH: "${{ inputs.patch }}"
+          IMAGE: "${{ steps.signature.outputs.ref }}"
+          TEMPLATES: "${{ steps.labels.outputs.second_input }}"
+          SCRATCH: "${{ steps.labels.outputs.scratch }}"
         run: |
           set -euo pipefail
           chmod -R a+rX workspace templates
@@ -184,63 +299,37 @@ jobs:
             args+=(--template "$repo=/templates/$index")
             index=$((index + 1))
           done <"$RUNNER_TEMP/pins"
-          threshold=(--fail-on error)
-          labels=$(docker image inspect --format '{{json .Config.Labels}}' "$IMAGE")
           scratch=()
-          if jq -e '.["org.nwarila.workflow.scratch"] == "true"' <<<"$labels" >/dev/null; then
+          if [[ "$SCRATCH" == "true" ]]; then
             scratch=(--tmpfs "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777" --tmpfs "/home/nonroot:rw,nosuid,nodev,noexec,size=16m,mode=1777")
           fi
-          if [[ "$TEMPLATES" != "true" ]]; then
-            config=".github/.config/${NAME}.yaml"
-            [[ -f "workspace/$config" ]] || { echo "::error::missing $config"; exit 2; }
-            args=(--config "/workspace/$config")
-            threshold=()
-          fi
-          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges "${scratch[@]}" -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
+          if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges "${scratch[@]}" -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" --format text >report.txt 2>error.txt; then status=0; else status=$?; fi
           if [[ ! "$status" =~ ^[012]$ ]]; then status=2; fi
           if [[ "$status" -eq 0 ]]; then
-            summary=$(tail -n 1 report.txt)
-            many='([2-9]|[1-9][0-9]+)'
-            not_one='(0|[2-9]|[1-9][0-9]+)'
-            templates="(1 template|${many} templates)"
-            checks="(1 check|${many} checks)"
-            errors="(1 error|${not_one} errors)"
-            warnings="(1 warning|${not_one} warnings)"
-            expected="^${NAME}: (PASS|WARNING \\([0-9]+ findings\\)|PASS \\(${templates}, ${checks}, 0 errors, 0 warnings\\)|WARNING \\(${templates}, ${checks}, ${errors}, ${warnings}\\))$"
-            if [[ "$TEMPLATES" == "true" ]]; then
-              if [[ ! "$summary" =~ $expected ]]; then status=2; fi
+            size=$(wc -c <report.txt)
+            if [[ "$size" -eq 0 ]]; then
+              status=2
             elif ! tail -n 1 report.txt | LC_ALL=C grep -qaxE "${NAME}: (PASS|WARNING)( \\([ -'*-~]+\\))?"; then
               status=2
             elif [[ "$(tail -c 1 report.txt | od -An -tx1)" != " 0a" ]]; then
               status=2
+            elif [[ "$size" -ge 2 && "$(tail -c 2 report.txt | head -c 1 | od -An -tx1)" == " 0a" ]]; then
+              status=2
             fi
-          fi
-          patch="${NAME}.patch"
-          if [[ "$status" -eq 1 && "$PATCH" == "true" ]]; then
-            if docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges "${scratch[@]}" -v "$PWD/workspace:/workspace:ro" "${mounts[@]}" "$IMAGE" --workspace /workspace "${args[@]}" "${threshold[@]}" --format patch >"$patch" 2>>error.txt; then patch_status=0; else patch_status=$?; fi
-            if [[ ! "$patch_status" =~ ^[012]$ ]]; then patch_status=2; fi
-            if [[ "$patch_status" -ne 1 ]]; then status=2; fi
           fi
           printf '{"problemMatcher":[{"owner":"workflow-containers","pattern":[{"regexp":"^(error|warning): ([^:]+?): (.*)$","severity":1,"file":2,"message":3}]}]}\n' >"$RUNNER_TEMP/matcher.json"
           echo "::add-matcher::$RUNNER_TEMP/matcher.json"
           cat report.txt
           cat error.txt >&2
-          if [[ ! -f "$patch" ]]; then : >"$patch"; fi
-          if [[ -s "$patch" ]]; then has_patch=true; else has_patch=false; fi
           case "$status" in
             0) result='passed' ;;
             1) result='failed' ;;
             *) result='could not complete' ;;
           esac
-          {
-            printf '### %s\n\nThe check %s. The full report is in the log of the Evaluate step.\n' "$NAME" "$result"
-            if [[ "$has_patch" == true ]]; then printf 'A suggested fix is attached as the artifact %s-patch.\n' "$NAME"; fi
-          } >>"$GITHUB_STEP_SUMMARY"
-          printf 'status=%s\nhas_patch=%s\npatch=%s\n' "$status" "$has_patch" "$patch" >>"$GITHUB_OUTPUT"
-      - if: steps.evaluate.outputs.has_patch == 'true'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with: {name: "${{ inputs.name }}-patch", path: "${{ steps.evaluate.outputs.patch }}", retention-days: 7}
+          printf '### %s\n\nThe check %s. The full report is in the log of the Evaluate step.\n' "$NAME" "$result" >>"$GITHUB_STEP_SUMMARY"
+          printf 'status=%s\n' "$status" >>"$GITHUB_OUTPUT"
       - name: Restore checker status
+        if: inputs.expect == 'pass'
         env:
           STATUS: ${{ steps.evaluate.outputs.status }}
         run: exit "$STATUS"
