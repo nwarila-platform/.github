@@ -1,6 +1,12 @@
-# Purpose: Provide contract 2's single execution path for factory-built workflow containers.
-# Role: Validate declared requirements, verify the factory identity, run, report, and restore status.
-# Contract 1 lives at 0188f9cc9d325aaa1d173286da9a2ba99210b09c.
+# Purpose: Run one workflow container built by nwarila-platform/workflow-container-factory (contract 2).
+# Role: Check the inputs, verify the factory's signature for exactly this name, version and digest, and
+# check that the version tag points at that digest. Then read the image's five requirement labels and
+# grant only what they declare: scratch space, and the pinned templates mounted read-only. Refuse full
+# history, SARIF and a built-image input, which contract 2 does not provide yet. Run the container
+# offline, check its report, and restore its status.
+# With expect: refuse (acceptance tests only), stop after the checks, never run the container, and
+# succeed only if a check refused the image.
+# Contract 1 is this file at commit 0188f9cc9d325aaa1d173286da9a2ba99210b09c of this repository.
 name: Run workflow container
 on:
   workflow_call:
